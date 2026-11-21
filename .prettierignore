@@ -1,0 +1,8 @@
+.editorconfig
+.git*
+.*ignore
+.*rc
+*.md
+fixtures/
+!.prettierrc
+!.github/
