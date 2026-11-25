@@ -1,4 +1,5 @@
-/target
+target/
+output/
 .DS_Store
-icon.svg
-output.png
+*.png
+!docs/*.png
