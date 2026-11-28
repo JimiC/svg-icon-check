@@ -13,12 +13,49 @@ authors = [
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive", "cargo"] }
-image = "0.25.0"
 resvg = "0.50.0"
 tempfile = "3.27.0"
 tiny-skia = "0.12.0"
+rayon = "1.12.0"
+
+[dev-dependencies]
+criterion = "0.8.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[lints.rust]
+redundant_imports = "deny"
+unsafe_code = "forbid"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
-unwrap_used = "deny"
+
+# Correctness and reliability
+dbg_macro = "deny"
 expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unwrap_used = "deny"
+
+# Code quality and maintainability
+branches_sharing_code = "warn"
+cognitive_complexity = "warn"
+collection_is_never_read = "warn"
+needless_pass_by_ref_mut = "warn"
+path_buf_push_overwrite = "warn"
+redundant_clone = "warn"
+
+# Performance
+perf = { level = "warn", priority = -1 }
+
+[[bench]]
+name = "icon_check"
+harness = false
+
+[[test]]
+name = "tests"
+path = "test/tests.rs"
