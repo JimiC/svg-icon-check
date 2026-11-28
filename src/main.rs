@@ -5,10 +5,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, crate_authors, value_parser};
+use clap::{ArgAction, CommandFactory, Error, Parser, crate_authors, error};
 use image::{ImageBuffer, Rgb};
 use resvg::usvg::{Options, Transform, Tree};
-use tiny_skia::{ALPHA_U8_OPAQUE, ColorU8, Pixmap, PremultipliedColorU8};
+use tiny_skia::{ALPHA_U8_OPAQUE, Pixmap, PremultipliedColorU8};
+
+const MAX_BACKGROUNDS: usize = 16;
 
 #[derive(Parser)]
 #[command(
@@ -41,21 +43,20 @@ struct Cli {
         short = 'w',
         long = "icon-width",
         default_value = "200",
-        value_parser = value_parser!(u32).range(1..=256),
+        value_parser = parse_icon_width,
         help = "Width of each icon section in pixels (1-256)"
     )]
     icon_width: u32,
-    // TECH DEBT: Investigate adding `value_parser = parse_rgb` returning ColorU8
-    // and declaring num_args = 1..16
-    // https://github.com/robertohuertasm/svg-icon-check/pull/3#discussion_r4659304488
     #[arg(
         short = 'b',
-        long = "backgrounds",
-        value_delimiter = ' ',
-        num_args = 1..,
-        help = "Additional background colors in RGB format (e.g., 255,0,0)"
+        long = "background",
+        action = ArgAction::Append,
+        num_args = 1,
+        value_name = "R,G,B",
+        value_parser = parse_rgb,
+        help = format!("Background color in RGB format, up to {MAX_BACKGROUNDS} times (e.g., 255,0,0)")
     )]
-    backgrounds: Vec<String>,
+    backgrounds: Vec<Rgb<u8>>,
 }
 
 struct PreviewJob {
@@ -69,8 +70,8 @@ fn main() -> Result<()> {
     // Get the list of jobs to process based on the input files
     let preview_jobs = get_preview_jobs(&cli.input)?;
 
-    // Parse and validate the background colors provided by the user
-    let background_colors = get_background_colors(&cli.backgrounds)?;
+    let background_colors =
+        get_background_colors(&cli.backgrounds).unwrap_or_else(|error| error.exit());
 
     // Create a temporary directory for storing preview images
     let temp_dir = tempfile::tempdir().context("Cannot create temporary directory")?;
@@ -205,42 +206,83 @@ fn is_svg_extension(extension: &str) -> bool {
     extension.eq_ignore_ascii_case("svg") || extension.eq_ignore_ascii_case("svgz")
 }
 
-fn get_background_colors(backgrounds: &[String]) -> Result<Vec<PremultipliedColorU8>> {
-    if backgrounds.len() > 16 {
-        bail!("At most 16 additional background colors are allowed");
+fn parse_icon_width(value: &str) -> Result<u32, String> {
+    let width = value
+        .parse::<u32>()
+        .map_err(|_| "enter a whole number from 1 to 256")?;
+    if !(1..=256).contains(&width) {
+        return Err("width must be between 1 and 256 pixels".to_owned());
     }
 
-    let default_colors = [
-        ColorU8::from_rgba(0, 0, 0, ALPHA_U8_OPAQUE).premultiply(),
-        ColorU8::from_rgba(255, 255, 255, ALPHA_U8_OPAQUE).premultiply(),
-    ];
+    Ok(width)
+}
+
+fn parse_rgb(value: &str) -> Result<Rgb<u8>, String> {
+    let mut components = value.split(',');
+    let (Some(red), Some(green), Some(blue), None) = (
+        components.next(),
+        components.next(),
+        components.next(),
+        components.next(),
+    ) else {
+        return Err("expected exactly three comma-separated RGB values".to_owned());
+    };
+
+    let parse_component = |component: &str| {
+        component
+            .trim()
+            .parse::<u8>()
+            .map_err(|_| "RGB values must be integers from 0 to 255".to_owned())
+    };
+    let red = parse_component(red)?;
+    let green = parse_component(green)?;
+    let blue = parse_component(blue)?;
+
+    Ok(Rgb([red, green, blue]))
+}
+
+fn format_rgb(Rgb([red, green, blue]): Rgb<u8>) -> String {
+    format!("{red},{green},{blue}")
+}
+
+fn get_background_colors(backgrounds: &[Rgb<u8>]) -> Result<Vec<Rgb<u8>>, Error> {
+    // Keep this check after parsing
+    // so we check the number of background colors after parsing them
+    if backgrounds.len() > MAX_BACKGROUNDS {
+        let command = Cli::command();
+        let literal = *command.get_styles().get_literal();
+        return Err(Error::raw(
+            error::ErrorKind::TooManyValues,
+            format!(
+                "too many values for '{literal}--background <R,G,B>{literal:#}': \
+                 at most {MAX_BACKGROUNDS} background option occurrences are allowed\n\n\
+                 For more information, try '{literal}--help{literal:#}'.\n"
+            ),
+        )
+        .with_cmd(&command));
+    }
+
+    let default_colors = [Rgb([0, 0, 0]), Rgb([255, 255, 255])];
     let mut background_colors = default_colors.to_vec();
 
     for background in backgrounds {
-        let rgb: [u8; 3] = background
-            .split(',')
-            .map(|c| c.trim().parse::<u8>())
-            .collect::<Result<Vec<u8>, _>>()
-            .map_err(anyhow::Error::from)
-            .and_then(|rgb| {
-                rgb.try_into()
-                    .map_err(|_| anyhow::anyhow!("Expected exactly three RGB values"))
-            })
-            .with_context(|| format!("Invalid RGB format: {background}"))?;
+        let skip_reason = if default_colors.contains(background) {
+            Some("already included by default")
+        } else if background_colors.contains(background) {
+            Some("duplicate")
+        } else {
+            None
+        };
 
-        let color = ColorU8::from_rgba(rgb[0], rgb[1], rgb[2], ALPHA_U8_OPAQUE).premultiply();
-
-        if default_colors.contains(&color) {
-            eprintln!("⚠ Skipping already included by default background color {background}");
+        if let Some(reason) = skip_reason {
+            eprintln!(
+                "⚠ Skipping {reason} background color: {}",
+                format_rgb(*background)
+            );
             continue;
         }
 
-        if background_colors.contains(&color) {
-            eprintln!("⚠ Skipping duplicate background color: {background}");
-            continue;
-        }
-
-        background_colors.push(color);
+        background_colors.push(*background);
     }
 
     Ok(background_colors)
@@ -248,7 +290,7 @@ fn get_background_colors(backgrounds: &[String]) -> Result<Vec<PremultipliedColo
 
 fn create_previews(
     preview_jobs: &[PreviewJob],
-    background_colors: &[PremultipliedColorU8],
+    background_colors: &[Rgb<u8>],
     icon_width: u32,
     temp_dir: &Path,
 ) -> Result<()> {
@@ -308,7 +350,7 @@ fn fit_transform(svg_width: f32, svg_height: f32, canvas_width: f32) -> Transfor
 
 fn render_with_backgrounds(
     pixmap: &Pixmap,
-    background_colors: &[PremultipliedColorU8],
+    background_colors: &[Rgb<u8>],
     icon_width: u32,
 ) -> Result<ImageBuffer<Rgb<u8>, Vec<u8>>> {
     let color_count =
@@ -334,16 +376,17 @@ fn render_with_backgrounds(
 }
 
 // TECH DEBT: https://github.com/robertohuertasm/svg-icon-check/pull/3#discussion_r4659304463
-fn blend(pixel: PremultipliedColorU8, background: PremultipliedColorU8) -> Rgb<u8> {
+fn blend(pixel: PremultipliedColorU8, background: Rgb<u8>) -> Rgb<u8> {
+    let Rgb([bg_red, bg_green, bg_blue]) = background;
     let a = f32::from(pixel.alpha()) / f32::from(ALPHA_U8_OPAQUE);
     // With a in 0..=1, the result is always within 0..=255, so the cast cannot
     // truncate or lose the sign
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let blend_colors = |c: u8, bg: u8| (f32::from(c) + (f32::from(bg) * (1.0 - a))) as u8;
     Rgb([
-        blend_colors(pixel.red(), background.red()),
-        blend_colors(pixel.green(), background.green()),
-        blend_colors(pixel.blue(), background.blue()),
+        blend_colors(pixel.red(), bg_red),
+        blend_colors(pixel.green(), bg_green),
+        blend_colors(pixel.blue(), bg_blue),
     ])
 }
 
